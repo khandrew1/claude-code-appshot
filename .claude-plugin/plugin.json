@@ -1,7 +1,8 @@
 {
   "name": "appshot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Press a shortcut in any Mac app to put a screenshot and the text of the window in front into your Claude prompt",
+  "types": "./types/index.d.ts",
   "author": {
     "name": "Andrew Khadder"
   },

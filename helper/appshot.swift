@@ -304,6 +304,12 @@ func capture(_ target: Target, source: String) {
   if hasImage, let (w, h) = pixelSize(png), max(w, h) > 2400 {
     run("/usr/bin/sips", ["-Z", "2400", png])
   }
+  // A small JPEG for the preview card above Claude's prompt.
+  let thumb = "\(inbox)/\(id).thumb.jpg"
+  let hasThumb =
+    hasImage
+    && run("/usr/bin/sips", ["-s", "format", "jpeg", "-s", "formatOptions", "70", "-Z", "320", png, "--out", thumb]) == 0
+    && FileManager.default.fileExists(atPath: thumb)
 
   let text = windowText(target, maxChars: 60000)
   var header = ["App: \(target.app)\(target.bundleID.map { " (\($0))" } ?? "")"]
@@ -325,6 +331,11 @@ func capture(_ target: Target, source: String) {
     "at": Int(now.timeIntervalSince1970 * 1000), "source": source,
   ]
   if hasImage { record["png"] = png }
+  if hasThumb, let (w, h) = pixelSize(thumb) {
+    record["thumb"] = thumb
+    record["thumbWidth"] = w
+    record["thumbHeight"] = h
+  }
   if let bundle = target.bundleID { record["bundleId"] = bundle }
   if let title = target.title { record["title"] = title }
   if let url = text.url { record["url"] = url }

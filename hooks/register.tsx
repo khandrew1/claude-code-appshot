@@ -1,21 +1,15 @@
-import type { Register } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { Attached } from '../types'
 
 // One macOS helper per machine listens for the shortcut (it holds a lock), and
 // writes each capture to ~/.claude/appshot/inbox. Every session running this mod
 // polls the inbox; the live session the person used most recently claims each
-// capture by renaming it into shots/, then mentions its files in the prompt box.
+// capture by renaming it into shots/, puts its @-mentions on the first line of
+// the prompt box, and shows a preview card above the box.
 
-type Capture = {
-  id: string
-  app: string
-  bundleId?: string
-  title?: string
-  url?: string
-  png?: string
-  txt: string
-  chars: number
-  at: number
-}
+type Capture = Attached & { url?: string; at: number }
 
 type Presence = { id: string; at: number; beat: number }
 
@@ -23,8 +17,64 @@ const BEAT_MS = 5_000
 const LIVE_MS = 20_000
 const POLL_MS = 400
 const STALE_MS = 120_000
+const SVG_LIMIT = 120_000
+
+// Change the tag when Attached's fields change: it declines what an earlier
+// version stored, which outlives a reload.
+const attached = atom({ plugin: 'appshot', key: 'attached' } as const, [], { shape: 'attached-1' })
 
 const basename = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+const mentionsOf = (shot: Attached) =>
+  [shot.png && `@${shot.png}`, shot.chars > 0 && `@${shot.txt}`].filter(
+    (token): token is string => Boolean(token),
+  )
+
+const isShotToken = (token: string) => token.startsWith('@') && token.includes('/appshot/shots/')
+
+// The draft's first line, when it holds only Appshot mentions, and the rest
+// after it (and after the blank line that follows it).
+function splitTop(text: string) {
+  const end = text.indexOf('\n')
+  const first = end < 0 ? text : text.slice(0, end)
+  const tokens = first.trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0 || !tokens.every(isShotToken)) return { tokens: [] as string[], rest: text, restAt: 0 }
+  let restAt = end < 0 ? text.length : end + 1
+  if (text[restAt] === '\n') restAt += 1
+  return { tokens, rest: text.slice(restAt), restAt }
+}
+
+// Writes the mention line, then a blank line, over the draft, keeping the
+// person's text and caret.
+async function writeTop($: EngineInterface, change: (tokens: string[]) => string[]) {
+  const box = await $.prompt.read()
+  const { tokens, rest, restAt } = splitTop(box.text)
+  const next = change(tokens)
+  const head = next.length > 0 ? `${next.join(' ')}\n\n` : ''
+  const caret = box.cursor >= restAt ? box.cursor - restAt : rest.length
+  const filled = await $.prompt.fill({ text: head + rest, mode: 'replace', cursor: head.length + caret })
+  return { filled, box, tokens }
+}
+
+// The card's ✕: drops the capture from the card and its mentions from the box.
+async function remove($: EngineInterface, id: string) {
+  const shot = (await read($, attached)).find(one => one.id === id)
+  await update($, attached, list => list.filter(one => one.id !== id))
+  if (!shot) return
+  const gone = new Set(mentionsOf(shot))
+  await writeTop($, list => list.filter(token => !gone.has(token)))
+}
+
+function thumbnailSvg(shot: Attached, width: number) {
+  if (!shot.thumb || !shot.thumbWidth || !shot.thumbHeight) return undefined
+  const height = Math.round((width * shot.thumbHeight) / shot.thumbWidth)
+  const source =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<clipPath id="r"><rect width="${width}" height="${height}" rx="6"/></clipPath>` +
+    `<image href="${shot.thumb}" width="${width}" height="${height}" clip-path="url(#r)" preserveAspectRatio="xMidYMid slice"/>` +
+    `</svg>`
+  return source.length <= SVG_LIMIT ? { source, height } : undefined
+}
 
 export const register: Register = (on, options) => {
   const shortcut =
@@ -43,13 +93,6 @@ export const register: Register = (on, options) => {
   let hasWarned = false
   let pending: Capture[] = []
 
-  const dirs = () => ({
-    inbox: `${root}/inbox`,
-    shots: `${root}/shots`,
-    sessions: `${root}/sessions`,
-    bins: `${root}/bin`,
-  })
-
   on('session.start', async ($, e, next) => {
     const started = await next(e)
 
@@ -66,7 +109,10 @@ export const register: Register = (on, options) => {
     claudePid = env.CLAUDE_PID ?? ''
     lastActive = await $.clock.now()
 
-    const { inbox, shots, sessions, bins } = dirs()
+    const inbox = `${root}/inbox`
+    const shots = `${root}/shots`
+    const sessions = `${root}/sessions`
+    const bins = `${root}/bin`
     await $.process.run(['/bin/mkdir', '-p', inbox, shots, sessions, bins])
     // Keep a week of captures; drop presence files of long-gone sessions.
     await $.process.run(['/usr/bin/find', shots, sessions, '-type', 'f', '-mtime', '+7', '-delete'])
@@ -93,29 +139,49 @@ export const register: Register = (on, options) => {
     }
 
     const deliver = async (shot: Capture) => {
-      const mentions = [shot.png && `@${shot.png}`, shot.chars > 0 && `@${shot.txt}`].filter(Boolean)
+      const mentions = mentionsOf(shot)
       if (mentions.length === 0) {
         $.ui.toast(
           `Appshot got nothing from ${shot.app}: Claude needs Screen Recording and Accessibility (run /appshot status).`,
         )
         return
       }
-      const box = await $.prompt.read()
-      const before = box.text.slice(0, box.cursor)
-      const lead = before && !/\s$/.test(before) ? ' ' : ''
-      const filled = await $.prompt.fill({ text: `${lead}${mentions.join(' ')} `, mode: 'insert' })
-      if (!filled.isFilled) pending = [...pending, shot]
+
+      if (shot.thumb) {
+        try {
+          const { base64 } = await $.fs.read(shot.thumb, { as: 'bytes' })
+          shot.thumb = `data:image/jpeg;base64,${base64}`
+        } catch {
+          shot.thumb = undefined
+        }
+      }
+
+      const { filled } = await writeTop($, tokens => [...tokens, ...mentions.filter(m => !tokens.includes(m))])
+      if (filled.isFilled) {
+        const card: Attached = {
+          id: shot.id,
+          app: shot.app,
+          title: shot.title,
+          png: shot.png,
+          txt: shot.txt,
+          chars: shot.chars,
+          thumb: shot.thumb,
+          thumbWidth: shot.thumbWidth,
+          thumbHeight: shot.thumbHeight,
+        }
+        await update($, attached, list => [...list.filter(one => one.id !== card.id), card])
+      } else {
+        pending = [...pending, shot]
+      }
       await $.fs.write(
         `${root}/last-delivery.json`,
         JSON.stringify({ id: shot.id, session: me, isFilled: filled.isFilled, refusal: filled.refusal ?? null }),
       )
 
-      const what = shot.title ? `${shot.app}: ${shot.title}` : shot.app
-      $.ui.toast(
-        filled.isFilled
-          ? `Appshot of ${what} added to your prompt`
-          : `Appshot of ${what} will go with your next message`,
-      )
+      if (!filled.isFilled) {
+        const what = shot.title ? `${shot.app}: ${shot.title}` : shot.app
+        $.ui.toast(`Appshot of ${what} will go with your next message`)
+      }
       if (focusClaude && bin && claudePid) void $.process.run([bin, 'activate', '--pid', claudePid])
     }
 
@@ -134,7 +200,7 @@ export const register: Register = (on, options) => {
           const claimed = await $.process.run(['/bin/mv', `${inbox}/${name}`, `${shots}/${name}`])
           if (claimed.exitCode !== 0) continue
           const shot = JSON.parse(await $.fs.read(`${shots}/${name}`)) as Capture
-          for (const key of ['png', 'txt'] as const) {
+          for (const key of ['png', 'txt', 'thumb'] as const) {
             const from = shot[key]
             if (!from) continue
             const to = `${shots}/${basename(from)}`
@@ -257,10 +323,23 @@ export const register: Register = (on, options) => {
     return started
   })
 
+  // The card follows the box: a capture whose mentions the person deleted goes.
+  on('prompt.change', async ($, e, next) => {
+    const result = await next(e)
+    const list = await read($, attached)
+    if (list.length === 0) return result
+    const kept = list.filter(shot => mentionsOf(shot).some(token => e.text.includes(token)))
+    if (kept.length !== list.length) await update($, attached, () => kept)
+    return result
+  })
+
   on('prompt.submit', async ($, e, next) => {
     // Only the person's own messages make this the session captures go to.
     const isPerson = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
     if (isPerson && !e.isMeta) lastActive = await $.clock.now()
+    if (isPerson && !e.isMeta && !e.command && (await read($, attached)).length > 0) {
+      await update($, attached, () => [])
+    }
     if (pending.length === 0 || e.isMeta || e.command || !isPerson) return next(e)
 
     const notes = pending.map(shot =>
@@ -276,6 +355,49 @@ export const register: Register = (on, options) => {
     pending = []
     return next({ ...e, context: [...(e.context ?? []), ...notes] })
   }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const list = await read($, attached)
+    if (list.length === 0 || e.props.hasSurvey) return next(e)
+
+    const table = $.ui.resolve(e)
+    const { Box, Text, Button } = table
+
+    const thumbnail = (shot: Attached) => {
+      if ('Svg' in table) {
+        const svg = thumbnailSvg(shot, 88)
+        if (svg) {
+          const { Svg } = table
+          return <Svg source={svg.source} alt={`Screenshot of ${shot.app}`} width={88} height={svg.height} />
+        }
+      }
+      if ('Image' in table && shot.png) {
+        const { Image } = table
+        return <Image source={{ file: shot.png, format: 'png' }} columns={12} rows={4} alt="[screenshot]" />
+      }
+      return null
+    }
+
+    return (
+      <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        {list.map(shot => (
+          <Box
+            key={`card:${shot.id}`}
+            flexDirection="row"
+            gap={1}
+            borderStyle="round"
+            borderDimColor
+            paddingX={1}
+            alignItems="center"
+          >
+            {thumbnail(shot)}
+            <Text bold>{shot.app}</Text>
+            <Button key={`remove:${shot.id}`} label="✕" plain role="dismiss" onPress={() => void remove($, shot.id)} />
+          </Box>
+        ))}
+      </Box>
+    )
+  })
 
   on('command.run', { command: 'appshot' }, async ($, e) => {
     lastActive = await $.clock.now()

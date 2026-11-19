@@ -6,7 +6,7 @@ The default shortcut is **Option + Option**: hold both Option keys together.
 
 ## What's in here
 
-- **The mod** (`hooks/register.ts`): a Claude Code plugin that starts the helper, picks up each capture, and inserts it into the prompt of the Claude session you used most recently.
+- **The mod** (`hooks/register.tsx`): a Claude Code plugin that starts the helper, picks up each capture, adds it to the prompt of the Claude session you used most recently, and shows a preview card above the prompt.
 - **The macOS helper** (`helper/appshot.swift`): a small Swift program that listens for the shortcut from any app, screenshots the window in front, and reads its text. The mod compiles it on first run.
 
 ## Requirements
@@ -39,11 +39,13 @@ claude plugin install appshot --marketplace khandrew1/claude-code-appshot
    - **Screen Recording:** takes the screenshot
    - **Accessibility:** reads the window's text
 3. Run `/appshot status` to check all three show as granted. If the shortcut does nothing right after granting, restart Claude.
-4. Switch to any app and press **Option + Option**. Claude comes to the front with the screenshot and the window text as `@` mentions in your prompt. Type your question and send.
+4. Switch to any app and press **Option + Option**. Claude comes to the front with a preview card above the prompt and the capture added to your prompt. Type your question and send.
 
 ## Usage
 
 - **Shortcut:** captures the window in front and sends it to the Claude session you typed in last.
+- **In the prompt:** each capture adds `@` mentions of its screenshot and text file on the first line of your prompt, followed by a blank line, so your question starts on its own line. Your cursor stays where it was.
+- **Preview card:** above the prompt, each capture shows a thumbnail and the app's name. Click **✕** to remove the capture from the card and its mentions from your prompt. Deleting the mentions yourself removes the card too, and sending clears it. The desktop app always shows the thumbnail; a terminal shows it only if it can display images (kitty, Ghostty, iTerm2).
 - **`/appshot [seconds]`:** captures whatever is in front after a delay (3 seconds by default). Handy for testing.
 - **`/appshot status`:** shows the shortcut and which permissions are missing.
 
