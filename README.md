@@ -43,7 +43,7 @@ claude plugin install appshot --marketplace khandrew1/claude-code-appshot
 
 ## Usage
 
-- **Shortcut:** captures the window in front and sends it to the Claude session you typed in last.
+- **Shortcut:** the window in front flashes white, and its screenshot and text go to the Claude session you typed in last.
 - **In the prompt:** each capture adds `@` mentions of its screenshot and text file on the first line of your prompt, followed by a blank line, so your question starts on its own line. Your cursor stays where it was.
 - **Preview card:** above the prompt, each capture shows a thumbnail and the app's name. Click **✕** to remove the capture from the card and its mentions from your prompt. Deleting the mentions yourself removes the card too, and sending clears it. The desktop app always shows the thumbnail; a terminal shows it only if it can display images (kitty, Ghostty, iTerm2).
 - **`/appshot [seconds]`:** captures whatever is in front after a delay (3 seconds by default). Handy for testing.
@@ -60,6 +60,7 @@ Change these in the plugin's config (`/config` in a terminal session):
 | `shortcut` | `option+option` | Both keys of one modifier (`option+option`, `command+command`, `control+control`, `shift+shift`) or a chord such as `ctrl+shift+s` |
 | `focusClaude` | `true` | Bring Claude to the front after a capture |
 | `sound` | `true` | Play the macOS screenshot sound |
+| `animation` | `true` | Flash the captured window white |
 
 ## Where captures go
 

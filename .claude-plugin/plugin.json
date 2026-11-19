@@ -1,6 +1,6 @@
 {
   "name": "appshot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Press a shortcut in any Mac app to put a screenshot and the text of the window in front into your Claude prompt",
   "types": "./types/index.d.ts",
   "author": {
@@ -25,6 +25,12 @@
       "type": "boolean",
       "title": "Shutter sound",
       "description": "Play the macOS screenshot sound on each capture",
+      "default": true
+    },
+    "animation": {
+      "type": "boolean",
+      "title": "Capture flash",
+      "description": "Flash the captured window white when you take an Appshot",
       "default": true
     }
   }

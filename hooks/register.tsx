@@ -83,6 +83,7 @@ export const register: Register = (on, options) => {
       : 'option+option'
   const focusClaude = options.focusClaude !== false
   const sound = options.sound !== false
+  const animation = options.animation !== false
 
   let root = ''
   let me = ''
@@ -291,7 +292,16 @@ export const register: Register = (on, options) => {
     }
 
     const listen = async (helper: string) => {
-      const argv = [helper, 'listen', '--shortcut', shortcut, ...(sound ? [] : ['--silent'])]
+      const argv = [
+        helper,
+        'listen',
+        '--shortcut',
+        shortcut,
+        ...(sound ? [] : ['--silent']),
+        ...(animation ? [] : ['--no-animation']),
+        // The helper brings Claude forward under the flash, so the switch is smooth.
+        ...(focusClaude ? ['--focus'] : []),
+      ]
       for (let attempt = 1; attempt <= 5; attempt++) {
         let buffer = ''
         try {

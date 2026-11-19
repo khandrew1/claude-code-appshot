@@ -16,6 +16,8 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 import ImageIO
+import ScreenCaptureKit
+import UniformTypeIdentifiers
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
@@ -115,6 +117,8 @@ struct Target {
   let app: String
   let bundleID: String?
   let title: String?
+  // Where the window sits, in CGWindowList's top-left-origin coordinates.
+  let bounds: CGRect
 }
 
 func onScreenWindows() -> [[String: Any]] {
@@ -162,9 +166,11 @@ func frontTarget(bundle: String?) -> Target? {
   let running = NSRunningApplication(processIdentifier: owner)
   let app = running?.localizedName ?? (window[kCGWindowOwnerName as String] as? String) ?? "App"
   let title = (window[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
+  let b = window[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+  let bounds = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: b["Width"] ?? 0, height: b["Height"] ?? 0)
   return Target(
     pid: owner, windowID: CGWindowID(number), app: app, bundleID: running?.bundleIdentifier,
-    title: title)
+    title: title, bounds: bounds)
 }
 
 // MARK: - Accessibility text
@@ -297,12 +303,23 @@ func capture(_ target: Target, source: String) {
   let png = "\(inbox)/\(id).png"
   let txt = "\(inbox)/\(id).txt"
 
-  var shot = ["-o", "-t", "png", "-l", String(target.windowID), png]
-  if silent { shot.insert("-x", at: 0) }
-  let status = run("/usr/sbin/screencapture", shot)
-  let hasImage = status == 0 && FileManager.default.fileExists(atPath: png)
-  if hasImage, let (w, h) = pixelSize(png), max(w, h) > 2400 {
-    run("/usr/bin/sips", ["-Z", "2400", png])
+  // ScreenCaptureKit answers in about a tenth of a second; `screencapture`
+  // stays as the fallback.
+  var hasImage = false
+  let grabStarted = Date()
+  let grabbed = grab(target)
+  let grabMs = Int(Date().timeIntervalSince(grabStarted) * 1000)
+  if let image = grabbed {
+    hasImage = writePNG(image, to: png)
+    if !silent { playShutter() }
+  }
+  if !hasImage {
+    var shot = ["-o", "-t", "png", "-l", String(target.windowID), png]
+    if silent { shot.insert("-x", at: 0) }
+    hasImage = run("/usr/sbin/screencapture", shot) == 0 && FileManager.default.fileExists(atPath: png)
+    if hasImage, let (w, h) = pixelSize(png), max(w, h) > 2400 {
+      run("/usr/bin/sips", ["-Z", "2400", png])
+    }
   }
   // A small JPEG for the preview card above Claude's prompt.
   let thumb = "\(inbox)/\(id).thumb.jpg"
@@ -328,7 +345,7 @@ func capture(_ target: Target, source: String) {
 
   var record: [String: Any] = [
     "id": id, "app": target.app, "txt": txt, "chars": text.chars,
-    "at": Int(now.timeIntervalSince1970 * 1000), "source": source,
+    "at": Int(now.timeIntervalSince1970 * 1000), "source": source, "grabMs": grabMs,
   ]
   if hasImage { record["png"] = png }
   if hasThumb, let (w, h) = pixelSize(thumb) {
@@ -361,7 +378,129 @@ func trigger() {
     emit(["event": "skipped", "reason": "no-window"])
     return
   }
+  if let bundle = target.bundleID, skipBundles.contains(bundle) {
+    emit(["event": "skipped", "reason": "front-is-claude", "app": target.app])
+    return
+  }
+  flash(target.bounds)
   captureQueue.async { capture(target, source: "shortcut") }
+}
+
+// MARK: - Flash
+//
+// A borderless window above everything flashes white over the captured window.
+// Claude is brought forward as the white comes up, so it arrives under the
+// white and the white fades off it: one smooth change, not a flash and then a
+// jump. The screenshot is taken of the window alone, so the flash never shows
+// in it.
+
+let animate = !flag("no-animation")
+let focusHost = flag("focus")
+var host: NSRunningApplication?
+var overlays: [NSWindow] = []
+
+func bringHostForward() {
+  guard focusHost, let path = host?.bundleURL?.path else { return }
+  DispatchQueue.global().async { run("/usr/bin/open", ["-a", path]) }
+}
+
+// CGWindowList counts from the top-left of the main display; AppKit from its bottom-left.
+func appKitRect(_ r: CGRect) -> NSRect {
+  let height = NSScreen.screens.first?.frame.height ?? 0
+  return NSRect(x: r.minX, y: height - r.maxY, width: r.width, height: r.height)
+}
+
+func flash(_ bounds: CGRect) {
+  guard animate else {
+    bringHostForward()
+    return
+  }
+  let frame = appKitRect(bounds)
+  let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+  window.isOpaque = false
+  window.backgroundColor = .clear
+  window.hasShadow = false
+  window.ignoresMouseEvents = true
+  window.isReleasedWhenClosed = false
+  window.level = .screenSaver
+  window.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+  let white = NSView(frame: NSRect(origin: .zero, size: frame.size))
+  white.wantsLayer = true
+  white.layer?.backgroundColor = NSColor.white.cgColor
+  white.layer?.cornerRadius = 10
+  white.autoresizingMask = [.width, .height]
+  window.contentView = white
+  window.alphaValue = 0
+  window.orderFrontRegardless()
+  overlays.append(window)
+  bringHostForward()
+  // Up over 0.12 s, held 0.1 s while Claude comes forward, then a slow 0.4 s fade.
+  NSAnimationContext.runAnimationGroup({ context in
+    context.duration = 0.12
+    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+    window.animator().alphaValue = 0.92
+  }) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      NSAnimationContext.runAnimationGroup({ context in
+        context.duration = 0.4
+        context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        window.animator().alphaValue = 0
+      }) {
+        window.orderOut(nil)
+        overlays.removeAll { $0 === window }
+      }
+    }
+  }
+}
+
+// MARK: - Fast capture
+
+// One window's pixels through ScreenCaptureKit, at most 2400 pixels on the long side.
+func grab(_ target: Target) -> CGImage? {
+  let done = DispatchSemaphore(value: 0)
+  var result: CGImage?
+  SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
+    guard let window = content?.windows.first(where: { $0.windowID == target.windowID }) else {
+      done.signal()
+      return
+    }
+    let filter = SCContentFilter(desktopIndependentWindow: window)
+    let rect = filter.contentRect
+    var scale = CGFloat(filter.pointPixelScale)
+    let longest = max(rect.width, rect.height) * scale
+    if longest > 2400 { scale *= 2400 / longest }
+    let config = SCStreamConfiguration()
+    config.width = max(1, Int(rect.width * scale))
+    config.height = max(1, Int(rect.height * scale))
+    config.showsCursor = false
+    config.ignoreShadowsSingleWindow = true
+    SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
+      result = image
+      done.signal()
+    }
+  }
+  _ = done.wait(timeout: .now() + 3)
+  return result
+}
+
+func writePNG(_ image: CGImage, to path: String) -> Bool {
+  guard
+    let destination = CGImageDestinationCreateWithURL(
+      URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil)
+  else { return false }
+  CGImageDestinationAddImage(destination, image, nil)
+  return CGImageDestinationFinalize(destination)
+}
+
+let shutter = NSSound(
+  contentsOfFile: "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif",
+  byReference: true)
+
+func playShutter() {
+  DispatchQueue.main.async {
+    shutter?.stop()
+    shutter?.play()
+  }
 }
 
 // MARK: - Listening
@@ -459,7 +598,13 @@ func listen() -> Never {
   CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
   CGEvent.tapEnable(tap: tap!, enable: true)
   emit(["event": "listening", "shortcut": text])
-  CFRunLoopRun()
+
+  // The app that started Claude (the desktop app or a terminal), brought
+  // forward under the flash. An accessory app has no Dock icon and never
+  // takes focus.
+  host = hostApp(from: getppid())
+  NSApplication.shared.setActivationPolicy(.accessory)
+  NSApplication.shared.run()
   exit(0)
 }
 
@@ -473,19 +618,30 @@ func parentPid(_ pid: pid_t) -> pid_t {
   return info.kp_eproc.e_ppid
 }
 
-func activate(pid start: pid_t) {
+// The first GUI app among a process's ancestors: the app it runs inside.
+func hostApp(from start: pid_t) -> NSRunningApplication? {
   var pid = start
   while pid > 1 {
     if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
-      let url = app.bundleURL
+      app.bundleURL != nil
     {
-      run("/usr/bin/open", ["-a", url.path])
-      emit(["event": "activated", "app": app.localizedName ?? url.lastPathComponent, "path": url.path, "pid": Int(pid)])
-      return
+      return app
     }
     pid = parentPid(pid)
   }
-  emit(["event": "activated", "app": NSNull()])
+  return nil
+}
+
+func activate(pid start: pid_t) {
+  guard let app = hostApp(from: start), let url = app.bundleURL else {
+    emit(["event": "activated", "app": NSNull()])
+    return
+  }
+  run("/usr/bin/open", ["-a", url.path])
+  emit([
+    "event": "activated", "app": app.localizedName ?? url.lastPathComponent, "path": url.path,
+    "pid": Int(app.processIdentifier),
+  ])
 }
 
 // MARK: - Main
