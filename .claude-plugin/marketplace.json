@@ -1,0 +1,5 @@
+{
+  "name": "claude-code-appshot",
+  "owner": { "name": "Andrew Khadder" },
+  "plugins": [{ "name": "appshot", "source": "./" }]
+}

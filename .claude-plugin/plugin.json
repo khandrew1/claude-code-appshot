@@ -1,0 +1,30 @@
+{
+  "name": "appshot",
+  "version": "0.1.0",
+  "description": "Press a shortcut in any Mac app to put a screenshot and the text of the window in front into your Claude prompt",
+  "author": {
+    "name": "Andrew Khadder"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/khandrew1/claude-code-appshot",
+  "userConfig": {
+    "shortcut": {
+      "type": "string",
+      "title": "Shortcut",
+      "description": "Both keys of one modifier held together (option+option, command+command, control+control, shift+shift) or a chord such as ctrl+shift+s",
+      "default": "option+option"
+    },
+    "focusClaude": {
+      "type": "boolean",
+      "title": "Bring Claude to the front",
+      "description": "Switch to Claude after a capture so you can type your question",
+      "default": true
+    },
+    "sound": {
+      "type": "boolean",
+      "title": "Shutter sound",
+      "description": "Play the macOS screenshot sound on each capture",
+      "default": true
+    }
+  }
+}
